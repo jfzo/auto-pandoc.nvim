@@ -62,7 +62,7 @@ local function parse_line(line)
   -- "geometry: margin=1in", etc.)
   local key, value = string.match(line, "^(.-):%s*(.*)")
   if key == nil then
-    vim.notify("auto-pandoc: could not parse line (missing ':'):\n" .. line, ERROR)
+    vim.notify("auto-pandoc: XXXcould not parse line (missing ':'):\n" .. line, ERROR)
     return
   end
 
