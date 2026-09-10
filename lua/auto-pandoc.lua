@@ -8,7 +8,7 @@ local cmd = vim.cmd
 
 local ERROR = vim.log.levels.ERROR
 
-M = {}
+local M = {}
 
 ---@param string string
 local function trim(string)
@@ -16,7 +16,7 @@ local function trim(string)
 end
 
 ---@param lines string[]
----@return number|nil #size of indent or nil if error
+---@return number|nil #tamaño del indent base (nivel 1), o nil si hay error
 local function get_yaml_indent(lines)
   local indent_size = 1000000
   for _, line in ipairs(lines) do
@@ -28,7 +28,6 @@ local function get_yaml_indent(lines)
     if line:sub(indent_pos, indent_pos) == "#" then
       -- comment line, success
     else
-      -- find the smallest indent in yaml
       local local_indent_size = (indent_pos - 1)
       if indent_size > local_indent_size then
         indent_size = local_indent_size
@@ -38,29 +37,34 @@ local function get_yaml_indent(lines)
   return indent_size
 end
 
----Parses a line of the YAML header
----@param line string #Line to parse
----@param indent_size number #Size of indent
----@return table|nil #Table if success, nil otherwise
-local function parse_line(line, indent_size)
+---Parsea una línea del bloque YAML en {key, value, indent}.
+---NO decide a qué nivel pertenece -- eso lo hace get_args, que tiene
+---el contexto (grupo padre) necesario para distinguirlo.
+---@param line string
+---@return table|false|nil
+--  false -> línea de comentario, ignorar (no es error)
+--  nil   -> error de parseo (ya notificado con vim.notify)
+--  table -> { key, value, indent }
+local function parse_line(line)
   local indent_pos, _ = string.find(line, "%S")
-  if indent_pos and line:sub(indent_pos, indent_pos) == "#" then
-    return -- comment line, success
-  end
-
-  local indent_level = (indent_pos - 1) / indent_size
-  if indent_level % 1 ~= 0 then -- make sure it is an integer
-    vim.notify("auto-pandoc: YAML indentation error:\n" .. line, ERROR)
+  if indent_pos == nil then
+    vim.notify("auto-pandoc: empty line in YAML header:\n" .. line, ERROR)
     return
   end
-
-  if indent_level ~= 1 then
-    vim.notify("auto-pandoc: indentation levels above 1 are unsupported:\n" .. line, ERROR)
-    return
+  if line:sub(indent_pos, indent_pos) == "#" then
+    return false -- comment line, ignorar (no es un error)
   end
 
+  local indent = indent_pos - 1
   line = trim(line)
-  local key, value = string.match(line, "^(.*):(.*)")
+  -- ".-" (no-greedy) en vez de ".*": corta en el PRIMER ":" de la línea,
+  -- para no romper valores que a su vez contienen ":" (rutas Windows,
+  -- "geometry: margin=1in", etc.)
+  local key, value = string.match(line, "^(.-):%s*(.*)")
+  if key == nil then
+    vim.notify("auto-pandoc: could not parse line (missing ':'):\n" .. line, ERROR)
+    return
+  end
 
   key = trim(key)
   if key:sub(1, 2) == "- " then
@@ -72,7 +76,74 @@ local function parse_line(line, indent_size)
     value = value:sub(1, comment_pos - 1)
   end
   value = trim(value)
-  return { key = key, value = value }
+  return { key = key, value = value, indent = indent }
+end
+
+---Combina una clave de grupo (nivel 1, ej. "variable") con un hijo de
+---nivel 2 (ej. "geometry" = "margin=1in") en un único par listo para
+---convertirse en flag de pandoc.
+---Pandoc acepta ":" o "=" para separar KEY de VAL en -V/--variable y
+-----metadata (ver Pandoc User's Guide: "-V KEY[=VAL] ... Either : or =
+---may be used to separate KEY from VAL" -- https://pandoc.org/MANUAL.html).
+---@param parent_key string
+---@param child_key string
+---@param child_value string
+---@return string, string
+local function merge_nested(parent_key, child_key, child_value)
+  return parent_key, child_key .. ":" .. child_value
+end
+
+---Recorre las líneas ya delimitadas del bloque `pandoc_:` y arma la
+---lista ordenada de {key, value} que luego se convierte en flags.
+---Soporta 1 o 2 niveles de indentación:
+---  - nivel 1 con value  -> entrada normal ("output: .pdf")
+---  - nivel 1 sin value  -> abre un grupo ("variable:")
+---  - nivel 2            -> hijo de ese grupo, se fusiona con merge_nested
+---Las claves repetidas (en cualquier nivel) SE CONSERVAN todas, en vez
+---de sobreescribirse, para poder repetir flags como --filter o --variable.
+---@param lines string[]
+---@param base_indent number
+---@return table[]|nil
+local function build_entries(lines, base_indent)
+  local entries = {}
+  local current_parent = nil
+  local current_child_indent = nil
+
+  for _, v in ipairs(lines) do
+    local kv = parse_line(v)
+    if kv == false then
+      -- comentario: ignorar y seguir
+    elseif kv == nil then
+      return nil -- error ya notificado dentro de parse_line
+    elseif kv.indent == base_indent then
+      -- nivel 1
+      current_parent = nil
+      current_child_indent = nil
+      if kv.value ~= "" then
+        table.insert(entries, { key = kv.key, value = kv.value })
+      else
+        current_parent = kv.key -- ej. "variable:" -- abre un grupo
+      end
+    elseif kv.indent > base_indent then
+      -- nivel 2 (hijo del último grupo abierto)
+      if not current_parent then
+        vim.notify("auto-pandoc: nested option without a parent group:\n" .. v, ERROR)
+        return nil
+      end
+      if current_child_indent == nil then
+        current_child_indent = kv.indent
+      elseif kv.indent ~= current_child_indent then
+        vim.notify("auto-pandoc: inconsistent or too-deep indentation:\n" .. v, ERROR)
+        return nil
+      end
+      local key, value = merge_nested(current_parent, kv.key, kv.value)
+      table.insert(entries, { key = key, value = value })
+    else
+      vim.notify("auto-pandoc: YAML indentation error:\n" .. v, ERROR)
+      return nil
+    end
+  end
+  return entries
 end
 
 ---Gets arguments from the YAML header and gives errors when options aren't correct
@@ -86,33 +157,41 @@ local function get_args()
   end
   local lnr_until = fn.search([[^\S]]) - 1
   local lines = api.nvim_buf_get_lines(0, lnr_from, lnr_until, true)
-  local indent_size = get_yaml_indent(lines)
-  if not indent_size then
+  local base_indent = get_yaml_indent(lines)
+  if not base_indent then
     return
   end
-  local parameters = {}
-  for _, v in ipairs(lines) do
-    local key_value = parse_line(v, indent_size)
-    if key_value then
-      parameters[key_value.key] = key_value.value
-    else
-      return
+
+  local entries = build_entries(lines, base_indent)
+  api.nvim_win_set_cursor(0, cur_pos)
+  if not entries then
+    return
+  end
+
+  local output_value = nil
+  for _, e in ipairs(entries) do
+    if e.key == "output" then
+      output_value = e.value
     end
   end
-  api.nvim_win_set_cursor(0, cur_pos)
-  local args = {}
-  if parameters["output"] == nil then
+  if output_value == nil then
     vim.notify("auto-pandoc: field `output` not specified, export failed", ERROR)
     return
   end
-  if parameters["output"]:sub(1, 1) == "." then
-    parameters["output"] = fn.expand([[%:p:r]]) .. parameters["output"]
+  if output_value:sub(1, 1) == "." then
+    output_value = fn.expand([[%:p:r]]) .. output_value
   end
-  for k, v in pairs(parameters) do
-    if v == "true" then
-      table.insert(args, "--" .. k)
+
+  local args = {}
+  for _, e in ipairs(entries) do
+    local key, value = e.key, e.value
+    if key == "output" then
+      value = output_value
+    end
+    if value == "true" then
+      table.insert(args, "--" .. key)
     else
-      table.insert(args, "--" .. k .. "=" .. v)
+      table.insert(args, "--" .. key .. "=" .. value)
     end
   end
   table.insert(args, fn.expand([[%:p]]))
@@ -123,7 +202,6 @@ end
 function M.run_pandoc()
   local cwd = fn.getcwd()
   cmd([[:cd %:p:h]])
-  os.execute("cd")
   local args = get_args()
   if args then
     vim.notify("auto-pandoc: conversion started")
