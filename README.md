@@ -1,3 +1,28 @@
+# Notes
+
+- This is a fork of the marvellous auto-pandoc.nvim plugin by jghauser.
+- I just added support of more parameter nesting levels within the YAML header.A
+- **Example:**
+
+```markdown
+---
+title: "TITLE"
+author: "AUTHOR"
+pandoc_:
+  output: .pdf
+  standalone: true
+  toc: false
+  number-sections: true
+  pdf-engine: xelatex
+  include-in-header: header.tex # standard header file for pandoc
+  variable:
+    geometry:top=3cm
+    geometry:bottom=2cm
+    geometry:left=2cm
+    geometry:right=2cm
+---
+```
+
 # auto-pandoc.nvim
 
 This plugin allows you to easily convert your markdown files using pandoc. It uses a custom key in the yaml block at the beginning of the markdown file to set pandoc settings. Converting your file then just requires running the supplied command (see below under configuration). This allows for quickly updating the file without having to supply file formats and other settings.
