@@ -207,8 +207,11 @@ function M.run_pandoc()
     vim.notify("auto-pandoc: conversion started")
     local cmd_parts = { "pandoc" }
     for _, arg in ipairs(args) do
-      if arg:find(" ") then
-        table.insert(cmd_parts, '"' .. arg .. '"')
+      local eq_pos = arg:find("=")
+      if eq_pos and arg:sub(eq_pos + 1):find(" ") then
+        local key = arg:sub(1, eq_pos)
+        local value = arg:sub(eq_pos + 1)
+        table.insert(cmd_parts, key .. '"' .. value .. '"')
       else
         table.insert(cmd_parts, arg)
       end
