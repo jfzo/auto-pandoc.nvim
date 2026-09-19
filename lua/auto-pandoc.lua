@@ -212,6 +212,8 @@ function M.run_pandoc()
         local key = arg:sub(1, eq_pos)
         local value = arg:sub(eq_pos + 1)
         table.insert(cmd_parts, key .. '"' .. value .. '"')
+      elseif arg:find(" ") then
+        table.insert(cmd_parts, '"' .. arg .. '"')
       else
         table.insert(cmd_parts, arg)
       end
