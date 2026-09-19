@@ -205,7 +205,15 @@ function M.run_pandoc()
   local args = get_args()
   if args then
     vim.notify("auto-pandoc: conversion started")
-    local cmd_str = "pandoc " .. table.concat(args, " ")
+    local cmd_parts = { "pandoc" }
+    for _, arg in ipairs(args) do
+      if arg:find(" ") then
+        table.insert(cmd_parts, '"' .. arg .. '"')
+      else
+        table.insert(cmd_parts, arg)
+      end
+    end
+    local cmd_str = table.concat(cmd_parts, " ")
     vim.notify("auto-pandoc: executing command:\n" .. cmd_str)
     local tmp_file = io.open("/tmp/pandoc_command.sh", "w")
     if tmp_file then
